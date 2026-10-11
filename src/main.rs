@@ -12,7 +12,7 @@ use log::{info, warn};
 use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
-use redlib::{config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
+use redlib::{api, config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
 
 use redlib::client::OAUTH_CLIENT;
 
@@ -73,6 +73,17 @@ async fn opensearch() -> Result<Response<Body>, String> {
 	)
 }
 
+// Served instead of the HTML error page in API-only mode.
+async fn api_not_found() -> Result<Response<Body>, String> {
+	Ok(
+		Response::builder()
+			.status(404)
+			.header("content-type", "application/json")
+			.body(r#"{"error":"Not found","detail":"This instance runs in API-only mode. GET /api lists the available endpoints."}"#.into())
+			.unwrap_or_default(),
+	)
+}
+
 async fn resource(body: &str, content_type: &str, cache: bool) -> Result<Response<Body>, String> {
 	let mut res = Response::builder()
 		.status(200)
@@ -119,6 +130,12 @@ async fn main() {
 		.about("Private front-end for Reddit written in Rust ")
 		.arg(Arg::new("ipv4-only").short('4').long("ipv4-only").help("Listen on IPv4 only").num_args(0))
 		.arg(Arg::new("ipv6-only").short('6').long("ipv6-only").help("Listen on IPv6 only").num_args(0))
+		.arg(
+			Arg::new("api-only")
+				.long("api-only")
+				.help("Serve only the /api JSON endpoints; requests to any other path return 404 (env: REDLIB_API_ONLY=on)")
+				.num_args(0),
+		)
 		.arg(
 			Arg::new("redirect-https")
 				.short('r')
@@ -178,6 +195,9 @@ async fn main() {
 	let ipv4_only = std::env::var("IPV4_ONLY").is_ok() || matches.get_flag("ipv4-only");
 	let ipv6_only = std::env::var("IPV6_ONLY").is_ok() || matches.get_flag("ipv6-only");
 
+	let api_only = matches.get_flag("api-only")
+		|| std::env::var("REDLIB_API_ONLY").map(|v| !matches!(v.trim().to_lowercase().as_str(), "" | "off" | "false" | "0")).unwrap_or(false);
+
 	let listener = if ipv4_only {
 		format!("0.0.0.0:{port}")
 	} else if ipv6_only {
@@ -187,6 +207,9 @@ async fn main() {
 	};
 
 	println!("Starting Redlib...");
+	if api_only {
+		info!("API-only mode enabled: serving /api endpoints only, all other paths return 404");
+	}
 
 	// Begin constructing a server
 	let mut app = server::Server::new();
@@ -218,6 +241,10 @@ async fn main() {
 		}
 	}
 
+	// Everything below (except the /api block) is the human-facing website: static
+	// assets, media proxies, HTML pages, settings, RSS and wiki routes. In API-only
+	// mode they are never registered, so unmatched paths short-circuit to a 404 JSON.
+	if !api_only {
 	// Read static files
 	app.at("/style.css").get(|_| style().boxed());
 	app
@@ -297,7 +324,21 @@ async fn main() {
 	app.at("/settings/restore").get(|r| settings::restore(r).boxed());
 	app.at("/settings/encoded-restore").post(|r| settings::encoded_restore(r).boxed());
 	app.at("/settings/update").get(|r| settings::update(r).boxed());
+	}
 
+	// JSON API (machine-readable views of the same Reddit data the HTML pages use)
+	app.at("/api").get(|r| api::index(r).boxed());
+	app.at("/api/r/:sub/about").get(|r| api::about(r).boxed());
+	app.at("/api/r/:sub/comments/:id").get(|r| api::post(r).boxed());
+	app.at("/api/r/:sub").get(|r| api::posts(r).boxed());
+	app.at("/api/r/:sub/:sort").get(|r| api::posts(r).boxed());
+	app.at("/api/comments/:id").get(|r| api::post(r).boxed());
+	app.at("/api/search").get(|r| api::search(r).boxed());
+	app.at("/api/r/:sub/search").get(|r| api::search(r).boxed());
+	app.at("/api/user/:name").get(|r| api::profile(r).boxed());
+	app.at("/api/user/:name/:listing").get(|r| api::profile(r).boxed());
+
+	if !api_only {
 	// RSS Subscriptions
 	app.at("/r/:sub.rss").get(|r| subreddit::rss(r).boxed());
 
@@ -406,8 +447,14 @@ async fn main() {
 		})
 	});
 
+	}
+
 	// Default service in case no routes match
-	app.at("/*").get(|req| error(req, "Nothing here").boxed());
+	if api_only {
+		app.at("/*").get(|_| api_not_found().boxed());
+	} else {
+		app.at("/*").get(|req| error(req, "Nothing here").boxed());
+	}
 
 	println!("Running Redlib v{} on {listener}!", env!("CARGO_PKG_VERSION"));
 
