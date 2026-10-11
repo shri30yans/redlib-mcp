@@ -326,7 +326,9 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 }
 
 /// Make a request to a Reddit API and parse the JSON response
-#[cached(size = 100, time = 30, result = true)]
+// Sized for batch scans: a pipeline touching many subs with paginated URLs blows past
+// the old 100-entry window, and a 30s TTL expires between phases of the same run.
+#[cached(size = 500, time = 120, result = true)]
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	// Closure to quickly build errors
 	let err = |msg: &str, e: String, path: String| -> Result<Value, String> {
