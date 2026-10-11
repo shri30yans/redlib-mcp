@@ -163,44 +163,78 @@ struct ExpandBudget {
 
 fn expand_nodes<'a>(nodes: &'a mut Vec<Value>, link_id: &'a str, sort: &'a str, count: &'a str, budget: &'a mut ExpandBudget) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
 	Box::pin(async move {
-	let mut i = 0;
-	while i < nodes.len() {
-		match nodes[i]["kind"].as_str() {
-			Some("more") => {
-				if budget.requests == 0 {
-					i += 1;
-					continue;
-				}
-				// morechildren expects bare basenames; link_id wants the full t3_ name
-				let ids: Vec<String> = nodes[i]["children"]
-					.as_array()
-					.map_or_else(Vec::new, |a| a.iter().filter_map(|c| c.as_str().map(ToString::to_string)).collect());
-				let mut fetched = Vec::new();
-				for chunk in ids.chunks(100) {
-					if budget.requests == 0 {
-						break;
-					}
-					budget.requests -= 1;
-					let path = format!("/api/morechildren?api_type=json&link_id={link_id}&sort={sort}&count={count}&children={}", chunk.join(","));
-					match json(path, false).await {
-						Ok(v) => fetched.extend(map_children(&v["json"]["data"]["things"])),
-						Err(e) => warn!("morechildren fetch failed: {e}"),
-					}
-				}
-				expand_nodes(&mut fetched, link_id, sort, count, budget).await;
-				nodes.splice(i..i + 1, fetched);
+	// Breadth-first: every `more` node at this level claims chunks from the shared budget
+	// in list order, all chunks are fetched concurrently, then subtrees expand recursively.
+	// A sequential walk would pay a full Reddit round-trip per chunk.
+	let mut planned: Vec<(usize, String)> = Vec::new();
+	for (idx, node) in nodes.iter().enumerate() {
+		if node["kind"].as_str() != Some("more") {
+			continue;
+		}
+		let ids: Vec<&str> = node["children"].as_array().map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_str).collect());
+		for chunk in ids.chunks(100) {
+			if budget.requests == 0 {
+				break;
 			}
-			Some("t1") => {
-				if nodes[i]["replies"].is_array() {
-					let mut replies = std::mem::replace(&mut nodes[i]["replies"], Value::Array(Vec::new()));
+			budget.requests -= 1;
+			// morechildren expects bare basenames; link_id wants the full t3_ name
+			let path = format!("/api/morechildren?api_type=json&link_id={link_id}&sort={sort}&count={count}&children={}", chunk.join(","));
+			planned.push((idx, path));
+		}
+	}
+
+	let owners: Vec<usize> = planned.iter().map(|(idx, _)| *idx).collect();
+	let mut results: Vec<Vec<Value>> = (0..planned.len()).map(|_| Vec::new()).collect();
+	let mut set = tokio::task::JoinSet::new();
+	for (seq, (_idx, path)) in planned.into_iter().enumerate() {
+		set.spawn(async move {
+			let batch = match json(path, false).await {
+				Ok(v) => map_children(&v["json"]["data"]["things"]),
+				Err(e) => {
+					warn!("morechildren fetch failed: {e}");
+					Vec::new()
+				}
+			};
+			(seq, batch)
+		});
+	}
+	while let Some(res) = set.join_next().await {
+		if let Ok((seq, batch)) = res {
+			results[seq] = batch;
+		}
+	}
+
+	// Regroup by originating node, preserving chunk order.
+	let mut grouped: std::collections::HashMap<usize, Vec<Vec<Value>>> = std::collections::HashMap::new();
+	for (seq, batch) in results.into_iter().enumerate() {
+		grouped.entry(owners[seq]).or_default().push(batch);
+	}
+
+	let current = std::mem::take(nodes);
+	for (idx, mut node) in current.into_iter().enumerate() {
+		let kind = node["kind"].as_str().unwrap_or_default().to_string();
+		match kind.as_str() {
+			"more" => {
+				match grouped.remove(&idx) {
+					Some(batches) => {
+						let mut fetched: Vec<Value> = batches.concat();
+						expand_nodes(&mut fetched, link_id, sort, count, budget).await;
+						nodes.extend(fetched);
+					}
+					None => nodes.push(node),
+				}
+			}
+			"t1" => {
+				if node["replies"].is_array() {
+					let mut replies = std::mem::replace(&mut node["replies"], Value::Array(Vec::new()));
 					if let Value::Array(ref mut r) = replies {
 						expand_nodes(r, link_id, sort, count, budget).await;
 					}
-					nodes[i]["replies"] = replies;
+					node["replies"] = replies;
 				}
-				i += 1;
+				nodes.push(node);
 			}
-			_ => i += 1,
+			_ => nodes.push(node),
 		}
 	}
 })
