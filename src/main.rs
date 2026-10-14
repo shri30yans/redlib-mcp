@@ -328,6 +328,9 @@ async fn main() {
 
 	// JSON API (machine-readable views of the same Reddit data the HTML pages use)
 	app.at("/api").get(|r| api::index(r).boxed());
+	app.at("/api/people/search").get(|r| api::search_people(r).boxed());
+	app.at("/api/r/:sub/comments/search").get(|r| api::search_comments(r).boxed());
+	app.at("/api/user/:name/about").get(|r| api::user_about(r).boxed());
 	app.at("/api/r/:sub/about").get(|r| api::about(r).boxed());
 	app.at("/api/r/:sub/comments/:id").get(|r| api::post(r).boxed());
 	app.at("/api/r/:sub").get(|r| api::posts(r).boxed());

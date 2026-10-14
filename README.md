@@ -77,6 +77,22 @@ Redlib currently implements most of Reddit's (signed-out) functionalities but st
 - [Askama](https://github.com/askama-rs/askama) - Templating engine
 - [Rustls](https://github.com/rustls/rustls) - TLS library
 
+## JSON API
+
+Redlib includes a JSON API intended for trusted integrations and can run without its HTML frontend by setting `REDLIB_API_ONLY=on` (or passing `--api-only`). In API-only mode, only `/api` routes are served; `GET /api` returns the endpoint index. The API uses the same Reddit upstream client, response cache, OAuth handling, and rate-limit tracking as the rest of Redlib.
+
+Discovery endpoints include:
+
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /api/search?q=...` | Reddit post search. Add `subreddit=...` to scope search to a subreddit, or use `/api/r/{subreddit}/search`. |
+| `GET /api/r/{subreddit}/comments/search?q=...` | Case-insensitive substring filtering over one page of that subreddit’s recent comment feed. `limit` is capped at 100; pass `after` from the response to scan the next page. |
+| `GET /api/people/search?q=...` | Reddit’s `type=user` search, projected as normalized user summaries. `limit` is capped at 100 and `after` paginates Reddit’s results. |
+| `GET /api/user/{username}/about` | Public profile summary for a known username. |
+| `GET /api/user/{username}/{posts\|comments}` | Recent submissions or comments for a known username. |
+
+Reddit does not provide Redlib with a dependable global or historical comment-text search endpoint. The comment search route therefore searches only the bounded recent comments feed for the requested subreddit; use pagination to continue through that feed. User search is limited to Reddit’s own index, matching rules, ranking, and exposed result fields, so it is not a complete people directory. These endpoints preserve Reddit’s upstream availability and rate limits and are not a source of exhaustive archival coverage.
+
 ## How is it different from other Reddit front ends?
 
 ### Teddit

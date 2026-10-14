@@ -51,8 +51,10 @@ fn comment_json(comment: &Value) -> Value {
 		"id": d["id"],
 		"name": d["name"],
 		"parent_id": d["parent_id"],
+		"link_id": d["link_id"],
 		"permalink": d["permalink"],
 		"author": d["author"],
+		"author_fullname": d["author_fullname"],
 		"subreddit": d["subreddit"],
 		"body": d["body"],
 		"created_utc": d["created_utc"],
@@ -62,6 +64,28 @@ fn comment_json(comment: &Value) -> Value {
 		"is_submitter": d["is_submitter"],
 		"distinguished": d["distinguished"],
 		"replies": replies,
+	})
+}
+
+fn person_json(person: &Value) -> Value {
+	let d = &person["data"];
+	let community = &d["subreddit"];
+	let created_utc = d["created_utc"].as_f64().or_else(|| d["created"].as_f64()).map_or(Value::Null, Value::from);
+	let total_karma = d["total_karma"].as_i64().unwrap_or_else(|| d["link_karma"].as_i64().unwrap_or_default() + d["comment_karma"].as_i64().unwrap_or_default());
+	json!({
+		"kind": "user",
+		"id": d["id"],
+		"name": d["name"],
+		"username": d["name"],
+		"profile_url": format!("/user/{}", d["name"].as_str().unwrap_or_default()),
+		"created_utc": created_utc,
+		"link_karma": d["link_karma"],
+		"comment_karma": d["comment_karma"],
+		"total_karma": total_karma,
+		"icon": d["icon_img"],
+		"title": community["title"],
+		"public_description": community["public_description"],
+		"nsfw": community["over_18"],
 	})
 }
 
@@ -135,6 +159,17 @@ fn query_param(req: &Request<Body>, name: &str) -> Option<String> {
 	url::form_urlencoded::parse(req.uri().query().unwrap_or_default().as_bytes())
 		.find(|(k, _)| k == name)
 		.map(|(_, v)| v.into_owned())
+}
+
+fn bounded_limit(req: &Request<Body>, default: usize, max: usize) -> usize {
+	query_param(req, "limit")
+		.and_then(|v| v.parse::<usize>().ok())
+		.unwrap_or(default)
+		.clamp(1, max)
+}
+
+fn encode_query_value(value: &str) -> String {
+	url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn invalid(param: &str, allowed: &[&str]) -> Response<Body> {
@@ -318,6 +353,100 @@ pub async fn search(req: Request<Body>) -> Result<Response<Body>, String> {
 	Ok(listing(path, can_access_quarantine(&req, &sub), None).await)
 }
 
+// GET /api/r/:sub/comments/search?q=...&limit=...&after=...
+// Reddit has no dependable global comment-text search endpoint. This scans one
+// bounded page from the subreddit comments feed and filters its bodies locally.
+pub async fn search_comments(req: Request<Body>) -> Result<Response<Body>, String> {
+	let sub = req.param("sub").unwrap_or_default();
+	let query = query_param(&req, "q").unwrap_or_default();
+	if query.trim().is_empty() {
+		return Ok(json_response(StatusCode::BAD_REQUEST, json!({ "error": "Missing required query parameter q" })));
+	}
+	let scan_limit = bounded_limit(&req, 100, 100);
+	let after = query_param(&req, "after").unwrap_or_default();
+	let mut params = vec![format!("limit={scan_limit}"), "raw_json=1".to_string()];
+	if !after.is_empty() {
+		params.push(format!("after={}", encode_query_value(&after)));
+	}
+	let path = format!("/r/{}/comments.json?{}", sub.replace('+', "%2B"), params.join("&"));
+	Ok(match json(path, can_access_quarantine(&req, &sub)).await {
+		Ok(v) => {
+			let data = &v["data"];
+			let query_lower = query.to_lowercase();
+			let scanned = data["children"].as_array().map_or(0, Vec::len);
+			let children: Vec<Value> = data["children"]
+				.as_array()
+				.into_iter()
+				.flatten()
+				.filter(|item| {
+					item["kind"].as_str() == Some("t1")
+						&& item["data"]["body"].as_str().is_some_and(|body| body.to_lowercase().contains(&query_lower))
+				})
+				.map(comment_json)
+				.collect();
+			json_response(StatusCode::OK, json!({
+				"query": query,
+				"scope": format!("r/{sub}"),
+				"mode": "recent_comments_filtered",
+				"scanned": scanned,
+				"count": children.len(),
+				"after": data["after"],
+				"before": data["before"],
+				"children": children,
+			}))
+		}
+		Err(e) => api_error(&e),
+	})
+}
+
+// GET /api/people/search?q=...&limit=...&after=...
+// Uses Reddit's own type=user search results; matching and completeness are
+// therefore bounded by Reddit's search index and ranking.
+pub async fn search_people(req: Request<Body>) -> Result<Response<Body>, String> {
+	let query = query_param(&req, "q").unwrap_or_default();
+	if query.trim().is_empty() {
+		return Ok(json_response(StatusCode::BAD_REQUEST, json!({ "error": "Missing required query parameter q" })));
+	}
+	let limit = bounded_limit(&req, 25, 100);
+	let after = query_param(&req, "after").unwrap_or_default();
+	let mut params = vec![format!("q={}", encode_query_value(&query)), "type=user".to_string(), format!("limit={limit}"), "raw_json=1".to_string()];
+	if !after.is_empty() {
+		params.push(format!("after={}", encode_query_value(&after)));
+	}
+	let path = format!("/search.json?{}", params.join("&"));
+	Ok(match json(path, false).await {
+		Ok(v) => {
+			let data = &v["data"];
+			let children: Vec<Value> = data["children"]
+				.as_array()
+				.into_iter()
+				.flatten()
+				.filter(|item| item["kind"].as_str() == Some("t2"))
+				.map(person_json)
+				.collect();
+			json_response(StatusCode::OK, json!({
+				"query": query,
+				"mode": "reddit_user_search",
+				"count": children.len(),
+				"after": data["after"],
+				"before": data["before"],
+				"children": children,
+			}))
+		}
+		Err(e) => api_error(&e),
+	})
+}
+
+// GET /api/user/:name/about
+pub async fn user_about(req: Request<Body>) -> Result<Response<Body>, String> {
+	let name = req.param("name").unwrap_or_default();
+	let path = format!("/user/{}/about.json?raw_json=1", encode_query_value(&name));
+	Ok(match json(path, false).await {
+		Ok(person) => json_response(StatusCode::OK, person_json(&person)),
+		Err(e) => api_error(&e),
+	})
+}
+
 // GET /api/user/:name[/:listing]?limit=&after=   (listing: posts | comments)
 pub async fn profile(req: Request<Body>) -> Result<Response<Body>, String> {
 	let name = req.param("name").unwrap_or_default();
@@ -339,6 +468,9 @@ pub async fn index(_: Request<Body>) -> Result<Response<Body>, String> {
 			"/api/comments/{id}": "Same, subreddit inferred.",
 			"/api/r/{subreddit}/about": "Subreddit metadata.",
 			"/api/search": "Search Reddit. Params: q (required), restrict_sr, subreddit, sort, limit, after.",
+			"/api/r/{subreddit}/comments/search": "Search comment text in one bounded page of recent subreddit comments. Params: q (required), limit (max 100 scanned), after. Not a global or historical comment search.",
+			"/api/people/search": "Search Reddit users via Reddit's type=user search. Params: q (required), limit (max 100), after. Results follow Reddit's index and ranking and are not exhaustive.",
+			"/api/user/{username}/about": "Public user profile summary.",
 			"/api/user/{username}/{listing}": "User listing. listing: posts|comments. Params: limit, after.",
 		},
 		"pagination": "Pass the previous response's 'after' as ?after=",
