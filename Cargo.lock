@@ -1623,8 +1623,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "redlib"
-version = "0.36.0"
+name = "redlib-mcp"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "askama",

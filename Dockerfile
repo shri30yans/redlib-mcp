@@ -1,20 +1,20 @@
-FROM alpine:3.19
+FROM rust:1.86-slim-bookworm AS builder
 
-ARG TARGET
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential cmake libclang-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apk add --no-cache curl
+WORKDIR /app
+COPY . .
+RUN cargo build --release --locked --bin redlib-mcp
 
-RUN curl -L "https://github.com/redlib-org/redlib/releases/latest/download/redlib-${TARGET}.tar.gz" | \
-    tar xz -C /usr/local/bin/
+FROM debian:bookworm-slim
 
-RUN adduser --home /nonexistent --no-create-home --disabled-password redlib
-USER redlib
+COPY --from=builder /app/target/release/redlib-mcp /usr/local/bin/redlib-mcp
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+USER 65532:65532
 
-# Tell Docker to expose port 8080
 EXPOSE 8080
-
-# Run a healthcheck every minute to make sure redlib is functional
-HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/settings || exit 1
-
-CMD ["redlib"]
-
+CMD ["redlib-mcp"]

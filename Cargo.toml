@@ -1,16 +1,23 @@
 [package]
-name = "redlib"
-description = " Alternative private front-end to Reddit"
+name = "redlib-mcp"
+description = "Stateless MCP server and JSON API for Reddit, built on Redlib"
 license = "AGPL-3.0-only"
-repository = "https://github.com/redlib-org/redlib"
-version = "0.36.0"
+repository = "https://github.com/shri30yans/redlib-mcp"
+version = "0.1.0"
 authors = [
     "Matthew Esposito <matt+cargo@matthew.science>",
     "spikecodes <19519553+spikecodes@users.noreply.github.com>",
 ]
 edition = "2021"
-rust-version = "1.81"
-default-run = "redlib"
+rust-version = "1.85"
+default-run = "redlib-mcp"
+
+[lib]
+name = "redlib"
+
+[[bin]]
+name = "redlib-mcp"
+path = "src/main.rs"
 
 [dependencies]
 askama = { version = "0.14.0", default-features = false, features = [

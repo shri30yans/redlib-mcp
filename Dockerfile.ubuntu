@@ -15,14 +15,14 @@ WORKDIR /redlib
 
 # download (most) dependencies in their own layer
 COPY Cargo.lock Cargo.toml ./
-RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs
-RUN cargo build --release --locked --bin redlib
-RUN rm ./src/main.rs && rmdir ./src
+RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs && touch src/lib.rs
+RUN cargo build --release --locked --bin redlib-mcp
+RUN rm ./src/main.rs ./src/lib.rs && rmdir ./src
 
 # copy the source and build the redlib binary
 COPY . ./
-RUN cargo build --release --locked --bin redlib
-RUN echo "finished building redlib!"
+RUN cargo build --release --locked --bin redlib-mcp
+RUN echo "finished building redlib-mcp!"
 
 ########################
 ## release image
@@ -30,7 +30,7 @@ RUN echo "finished building redlib!"
 FROM ubuntu:${UBUNTU_RELEASE_VERSION} AS release
 
 # Import redlib binary from builder
-COPY --from=builder /redlib/target/release/redlib /usr/local/bin/redlib
+COPY --from=builder /redlib/target/release/redlib-mcp /usr/local/bin/redlib-mcp
 
 # Add non-root user for running redlib
 RUN useradd \
@@ -43,10 +43,7 @@ USER redlib
 # Document that we intend to expose port 8080 to whoever runs the container
 EXPOSE 8080
 
-# Run a healthcheck every minute to make sure redlib is functional
-HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/settings || exit 1
-
 # Add container metadata
-LABEL org.opencontainers.image.authors="sigaloid"
+LABEL org.opencontainers.image.authors="Redlib MCP contributors"
 
-CMD ["redlib"]
+CMD ["redlib-mcp"]

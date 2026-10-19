@@ -12,7 +12,7 @@ use log::{info, warn};
 use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
-use redlib::{api, config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
+use redlib::{api, config, duplicates, headers, instance_info, mcp, post, search, settings, subreddit, user};
 
 use redlib::client::OAUTH_CLIENT;
 
@@ -79,7 +79,7 @@ async fn api_not_found() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(404)
 			.header("content-type", "application/json")
-			.body(r#"{"error":"Not found","detail":"This instance runs in API-only mode. GET /api lists the available endpoints."}"#.into())
+			.body(r#"{"error":"Not found","detail":"This instance serves /mcp and /api endpoints; GET /api lists the REST API routes."}"#.into())
 			.unwrap_or_default(),
 	)
 }
@@ -125,17 +125,11 @@ async fn main() {
 	// Initialize logger
 	pretty_env_logger::init();
 
-	let matches = Command::new("Redlib")
+	let matches = Command::new("Redlib MCP")
 		.version(env!("CARGO_PKG_VERSION"))
-		.about("Private front-end for Reddit written in Rust ")
+		.about("MCP server and JSON API for Reddit, built on Redlib")
 		.arg(Arg::new("ipv4-only").short('4').long("ipv4-only").help("Listen on IPv4 only").num_args(0))
 		.arg(Arg::new("ipv6-only").short('6').long("ipv6-only").help("Listen on IPv6 only").num_args(0))
-		.arg(
-			Arg::new("api-only")
-				.long("api-only")
-				.help("Serve only the /api JSON endpoints; requests to any other path return 404 (env: REDLIB_API_ONLY=on)")
-				.num_args(0),
-		)
 		.arg(
 			Arg::new("redirect-https")
 				.short('r')
@@ -195,8 +189,7 @@ async fn main() {
 	let ipv4_only = std::env::var("IPV4_ONLY").is_ok() || matches.get_flag("ipv4-only");
 	let ipv6_only = std::env::var("IPV6_ONLY").is_ok() || matches.get_flag("ipv6-only");
 
-	let api_only = matches.get_flag("api-only")
-		|| std::env::var("REDLIB_API_ONLY").map(|v| !matches!(v.trim().to_lowercase().as_str(), "" | "off" | "false" | "0")).unwrap_or(false);
+	let api_only = true;
 
 	let listener = if ipv4_only {
 		format!("0.0.0.0:{port}")
@@ -206,9 +199,14 @@ async fn main() {
 		[address, ":", port].concat()
 	};
 
-	println!("Starting Redlib...");
+	println!("Starting Redlib MCP...");
 	if api_only {
-		info!("API-only mode enabled: serving /api endpoints only, all other paths return 404");
+		info!("API-only mode enabled: serving /mcp and /api; website routes are disabled");
+	}
+	if api::token_required() {
+		info!("API access token required (REDLIB_API_TOKEN is set)");
+	} else {
+		warn!("REDLIB_API_TOKEN is not set: /api and /mcp are open to anyone who can reach this address");
 	}
 
 	// Begin constructing a server
@@ -327,19 +325,21 @@ async fn main() {
 	}
 
 	// JSON API (machine-readable views of the same Reddit data the HTML pages use)
-	app.at("/api").get(|r| api::index(r).boxed());
-	app.at("/api/people/search").get(|r| api::search_people(r).boxed());
-	app.at("/api/r/:sub/comments/search").get(|r| api::search_comments(r).boxed());
-	app.at("/api/user/:name/about").get(|r| api::user_about(r).boxed());
-	app.at("/api/r/:sub/about").get(|r| api::about(r).boxed());
-	app.at("/api/r/:sub/comments/:id").get(|r| api::post(r).boxed());
-	app.at("/api/r/:sub").get(|r| api::posts(r).boxed());
-	app.at("/api/r/:sub/:sort").get(|r| api::posts(r).boxed());
-	app.at("/api/comments/:id").get(|r| api::post(r).boxed());
-	app.at("/api/search").get(|r| api::search(r).boxed());
-	app.at("/api/r/:sub/search").get(|r| api::search(r).boxed());
-	app.at("/api/user/:name").get(|r| api::profile(r).boxed());
-	app.at("/api/user/:name/:listing").get(|r| api::profile(r).boxed());
+	app.at("/api").get(|r| api::guarded(r, api::index).boxed());
+	app.at("/api/people/search").get(|r| api::guarded(r, api::search_people).boxed());
+	app.at("/api/subreddits/search").get(|r| api::guarded(r, api::search_subreddits).boxed());
+	app.at("/api/r/:sub/comments/search").get(|r| api::guarded(r, api::search_comments).boxed());
+	app.at("/api/user/:name/about").get(|r| api::guarded(r, api::user_about).boxed());
+	app.at("/api/r/:sub/about").get(|r| api::guarded(r, api::about).boxed());
+	app.at("/api/r/:sub/comments/:id").get(|r| api::guarded(r, api::post).boxed());
+	app.at("/api/r/:sub").get(|r| api::guarded(r, api::posts).boxed());
+	app.at("/api/r/:sub/:sort").get(|r| api::guarded(r, api::posts).boxed());
+	app.at("/api/comments/:id").get(|r| api::guarded(r, api::post).boxed());
+	app.at("/api/search").get(|r| api::guarded(r, api::search).boxed());
+	app.at("/api/r/:sub/search").get(|r| api::guarded(r, api::search).boxed());
+	app.at("/api/user/:name").get(|r| api::guarded(r, api::profile).boxed());
+	app.at("/api/user/:name/:listing").get(|r| api::guarded(r, api::profile).boxed());
+	app.at("/mcp").post(|r| mcp::handle(r).boxed()).get(|r| mcp::method_not_allowed(r).boxed());
 
 	if !api_only {
 	// RSS Subscriptions
@@ -459,7 +459,7 @@ async fn main() {
 		app.at("/*").get(|req| error(req, "Nothing here").boxed());
 	}
 
-	println!("Running Redlib v{} on {listener}!", env!("CARGO_PKG_VERSION"));
+	println!("Running Redlib MCP v{} on {listener}!", env!("CARGO_PKG_VERSION"));
 
 	let server = app.listen(&listener);
 

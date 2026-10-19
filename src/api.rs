@@ -4,6 +4,8 @@ use crate::subreddit::can_access_quarantine;
 use hyper::{Body, Request, Response, StatusCode};
 use log::warn;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::sync::LazyLock;
 
 const POST_SORTS: [&str; 5] = ["hot", "new", "top", "rising", "controversial"];
 
@@ -17,6 +19,7 @@ fn post_json(post: &Value) -> Value {
 		"name": d["name"],
 		"title": d["title"],
 		"author": d["author"],
+		"author_fullname": d["author_fullname"],
 		"author_flair_text": d["author_flair_text"],
 		"subreddit": d["subreddit"],
 		"permalink": d["permalink"],
@@ -89,6 +92,30 @@ fn person_json(person: &Value) -> Value {
 	})
 }
 
+fn subreddit_json(subreddit: &Value) -> Value {
+	let d = &subreddit["data"];
+	json!({
+		"kind": "subreddit",
+		"id": d["id"],
+		"name": d["display_name"],
+		"name_prefixed": d["display_name_prefixed"],
+		"title": d["title"],
+		"url": d["url"],
+		"public_description": d["public_description"],
+		"description": d["description"],
+		"subscribers": d["subscribers"],
+		"active_users": d["active_user_count"],
+		"created_utc": d["created_utc"],
+		"nsfw": d["over18"],
+		"subreddit_type": d["subreddit_type"],
+		"submission_type": d["submission_type"],
+		"icon": d["icon_img"],
+		"community_icon": d["community_icon"],
+		"banner": d["banner_img"],
+		"primary_color": d["primary_color"],
+	})
+}
+
 // "more" nodes mark comment threads Reddit did not inline; `count` says how many are hidden.
 fn more_json(node: &Value) -> Value {
 	let d = &node["data"];
@@ -112,6 +139,53 @@ fn map_children(children: &Value) -> Vec<Value> {
 			})
 			.collect()
 	})
+}
+
+// When configured, require a shared bearer token for every machine-facing endpoint.
+static API_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("REDLIB_API_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty()));
+
+pub fn token_required() -> bool {
+	API_TOKEN.is_some()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+	if left.len() != right.len() {
+		return false;
+	}
+	left.iter().zip(right).fold(0u8, |difference, (a, b)| difference | (a ^ b)) == 0
+}
+
+pub fn unauthorized_response(req: &Request<Body>) -> Option<Response<Body>> {
+	let expected = API_TOKEN.as_ref()?;
+	let supplied = req
+		.headers()
+		.get("authorization")
+		.and_then(|value| value.to_str().ok())
+		.and_then(|value| value.strip_prefix("Bearer "))
+		.unwrap_or("");
+	if constant_time_eq(supplied.as_bytes(), expected.as_bytes()) {
+		None
+	} else {
+		Some(
+			Response::builder()
+				.status(StatusCode::UNAUTHORIZED)
+				.header("content-type", "application/json; charset=utf-8")
+				.header("www-authenticate", "Bearer")
+				.body(r#"{"error":"unauthorized","detail":"Send Authorization: Bearer <REDLIB_API_TOKEN>."}"#.into())
+				.unwrap_or_default(),
+		)
+	}
+}
+
+pub async fn guarded<F, Fut>(req: Request<Body>, handler: F) -> Result<Response<Body>, String>
+where
+	F: FnOnce(Request<Body>) -> Fut,
+	Fut: Future<Output = Result<Response<Body>, String>>,
+{
+	if let Some(response) = unauthorized_response(&req) {
+		return Ok(response);
+	}
+	handler(req).await
 }
 
 // RESPONSE HELPERS
@@ -437,6 +511,46 @@ pub async fn search_people(req: Request<Body>) -> Result<Response<Body>, String>
 	})
 }
 
+// GET /api/subreddits/search?q=...&limit=...&after=...
+// Discovery is bounded by Reddit's search index and ranking. This is not a complete
+// directory of communities, and continuation follows Reddit's result cursor.
+pub async fn search_subreddits(req: Request<Body>) -> Result<Response<Body>, String> {
+	let query = query_param(&req, "q").unwrap_or_default();
+	if query.trim().is_empty() {
+		return Ok(json_response(StatusCode::BAD_REQUEST, json!({ "error": "Missing required query parameter q" })));
+	}
+	let limit = bounded_limit(&req, 25, 100);
+	let after = query_param(&req, "after").unwrap_or_default();
+	let mut params = vec![format!("q={}", encode_query_value(&query)), format!("limit={limit}"), "raw_json=1".to_string()];
+	if !after.is_empty() {
+		params.push(format!("after={}", encode_query_value(&after)));
+	}
+	let path = format!("/subreddits/search.json?{}", params.join("&"));
+	Ok(match json(path, false).await {
+		Ok(v) => {
+			let data = &v["data"];
+			let children: Vec<Value> = data["children"]
+				.as_array()
+				.into_iter()
+				.flatten()
+				.filter(|item| item["kind"].as_str() == Some("t5"))
+				.map(subreddit_json)
+				.collect();
+			json_response(StatusCode::OK, json!({
+				"query": query,
+				"mode": "reddit_subreddit_search",
+				"limit": limit,
+				"count": children.len(),
+				"after": data["after"],
+				"before": data["before"],
+				"completeness": "Reddit search-index results only; ranking and coverage are controlled by Reddit and are not exhaustive.",
+				"children": children,
+			}))
+		}
+		Err(e) => api_error(&e),
+	})
+}
+
 // GET /api/user/:name/about
 pub async fn user_about(req: Request<Body>) -> Result<Response<Body>, String> {
 	let name = req.param("name").unwrap_or_default();
@@ -470,6 +584,7 @@ pub async fn index(_: Request<Body>) -> Result<Response<Body>, String> {
 			"/api/search": "Search Reddit. Params: q (required), restrict_sr, subreddit, sort, limit, after.",
 			"/api/r/{subreddit}/comments/search": "Search comment text in one bounded page of recent subreddit comments. Params: q (required), limit (max 100 scanned), after. Not a global or historical comment search.",
 			"/api/people/search": "Search Reddit users via Reddit's type=user search. Params: q (required), limit (max 100), after. Results follow Reddit's index and ranking and are not exhaustive.",
+			"/api/subreddits/search": "Discover communities via Reddit subreddit search. Params: q (required), limit (max 100), after. Results follow Reddit's index and ranking and are not exhaustive.",
 			"/api/user/{username}/about": "Public user profile summary.",
 			"/api/user/{username}/{listing}": "User listing. listing: posts|comments. Params: limit, after.",
 		},

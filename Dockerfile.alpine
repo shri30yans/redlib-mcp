@@ -17,14 +17,14 @@ WORKDIR /redlib
 
 # download (most) dependencies in their own layer
 COPY Cargo.lock Cargo.toml ./
-RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs
-RUN cargo build --release --locked --bin redlib --target x86_64-unknown-linux-musl
-RUN rm ./src/main.rs && rmdir ./src
+RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs && touch src/lib.rs
+RUN cargo build --release --locked --bin redlib-mcp --target x86_64-unknown-linux-musl
+RUN rm ./src/main.rs ./src/lib.rs && rmdir ./src
 
 # copy the source and build the redlib binary
 COPY . ./
-RUN cargo build --release --locked --bin redlib --target x86_64-unknown-linux-musl
-RUN echo "finished building redlib!"
+RUN cargo build --release --locked --bin redlib-mcp --target x86_64-unknown-linux-musl
+RUN echo "finished building redlib-mcp!"
 
 ########################
 ## release image
@@ -32,7 +32,7 @@ RUN echo "finished building redlib!"
 FROM alpine:${ALPINE_VERSION} AS release
 
 # Import redlib binary from builder
-COPY --from=builder /redlib/target/x86_64-unknown-linux-musl/release/redlib /usr/local/bin/redlib
+COPY --from=builder /redlib/target/x86_64-unknown-linux-musl/release/redlib-mcp /usr/local/bin/redlib-mcp
 
 # Add non-root user for running redlib
 RUN adduser --home /nonexistent --no-create-home --disabled-password redlib
@@ -41,10 +41,9 @@ USER redlib
 # Document that we intend to expose port 8080 to whoever runs the container
 EXPOSE 8080
 
-# Run a healthcheck every minute to make sure redlib is functional
-HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/settings || exit 1
+HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/api || exit 1
 
 # Add container metadata
-LABEL org.opencontainers.image.authors="sigaloid"
+LABEL org.opencontainers.image.authors="Redlib MCP contributors"
 
-CMD ["redlib"]
+CMD ["redlib-mcp"]
