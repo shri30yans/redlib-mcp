@@ -309,7 +309,7 @@ fn tool_definitions() -> Value {
 			"name": "reddit_get_post_thread",
 			"description": "Fetch a Reddit post and its comment tree. Hidden replies can be expanded with a bounded request budget.",
 			"inputSchema": { "type": "object", "properties": {
-				"post_id": { "type": "string" }, "subreddit": { "type": "string", "description": "Optional subreddit, useful for quarantined communities." },
+				"post_id": { "type": "string" }, "subreddit": { "type": "string", "description": "Optional subreddit route context; Reddit normally infers it from the post." },
 				"sort": { "type": "string" }, "expand": { "type": "boolean", "description": "Fetch hidden replies." }, "budget": { "type": "integer", "minimum": 0, "maximum": 50, "description": "Maximum morechildren requests (hard-capped at 50)." }
 			}, "required": ["post_id"] },
 			"annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
