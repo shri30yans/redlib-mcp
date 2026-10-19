@@ -1,7 +1,7 @@
 FROM rust:1.86-slim-bookworm AS builder
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential cmake libclang-dev pkg-config \
+    && apt-get install -y --no-install-recommends build-essential cmake git libclang-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
