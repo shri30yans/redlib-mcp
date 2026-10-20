@@ -130,6 +130,14 @@ async fn call_api(handler: ApiHandler, request: Request<Body>) -> (StatusCode, V
 	}
 }
 
+fn time_arg(args: &Value) -> Result<Option<(String, String)>, String> {
+	match string_arg(args, "time")? {
+		Some(value) if ["hour", "day", "week", "month", "year", "all"].contains(&value.as_str()) => Ok(Some(("t".to_string(), value))),
+		Some(_) => Err("`time` must be hour, day, week, month, year, or all.".to_string()),
+		None => Ok(None),
+	}
+}
+
 async fn call_tool(name: &str, args: &Value) -> Value {
 	let result: Result<(ApiHandler, String, Vec<(String, String)>, Vec<(String, String)>), String> = (|| {
 		let mut route = Vec::new();
@@ -143,6 +151,7 @@ async fn call_tool(name: &str, args: &Value) -> Value {
 						query.push((parameter.to_string(), value));
 					}
 				}
+				query.extend(time_arg(args)?);
 				if let Some(value) = args.get("restrict_sr") {
 					let value = match value {
 						Value::Bool(true) => "on".to_string(),
@@ -172,6 +181,7 @@ async fn call_tool(name: &str, args: &Value) -> Value {
 						query.push((parameter.to_string(), value));
 					}
 				}
+				query.extend(time_arg(args)?);
 				(ApiHandler::Posts, format!("/api/r/{subreddit}/{sort}"))
 			}
 			"reddit_search_recent_comments" => {
@@ -270,6 +280,7 @@ fn tool_definitions() -> Value {
 				"query": { "type": "string", "description": "Search terms." },
 				"subreddit": { "type": "string", "description": "Optional subreddit scope." },
 				"sort": { "type": "string", "description": "Reddit search sort." },
+				"time": { "type": "string", "enum": ["hour", "day", "week", "month", "year", "all"], "description": "Time window for sort=top (and relevance/comments). Defaults to Reddit's own default." },
 				"limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum results requested." },
 				"after": { "type": "string", "description": "Reddit pagination cursor from a previous response." },
 				"restrict_sr": { "type": "boolean", "description": "Restrict results to the subreddit. Defaults to true whenever subreddit is given; pass false to search all of Reddit." }
@@ -281,7 +292,8 @@ fn tool_definitions() -> Value {
 			"description": "List posts from a subreddit using hot, new, top, rising, or controversial sorting.",
 			"inputSchema": { "type": "object", "properties": {
 				"subreddit": { "type": "string" }, "sort": { "type": "string", "enum": ["hot", "new", "top", "rising", "controversial"] },
-			"limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "after": { "type": "string" }, "flair": { "type": "string" }
+			"limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "after": { "type": "string" }, "flair": { "type": "string" },
+				"time": { "type": "string", "enum": ["hour", "day", "week", "month", "year", "all"], "description": "Time window for sort=top or controversial. Without it Reddit defaults to a short window, so small subreddits return few posts." }
 			}, "required": ["subreddit"] },
 			"annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
 		},
