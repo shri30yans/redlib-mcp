@@ -421,7 +421,11 @@ pub async fn search(req: Request<Body>) -> Result<Response<Body>, String> {
 		return Ok(json_response(StatusCode::BAD_REQUEST, json!({ "error": "Missing required query parameter q" })));
 	}
 	let (path, sub) = match req.param("sub") {
-		Some(sub) => (format!("/r/{}/search.json?{}&raw_json=1", sub.replace('+', "%2B"), query), sub),
+		Some(sub) => {
+			// Reddit searches all of Reddit unless restrict_sr is set, so a subreddit scope implies it unless the caller says otherwise.
+			let restrict = if query.split('&').any(|kv| kv.starts_with("restrict_sr=")) { "" } else { "&restrict_sr=on" };
+			(format!("/r/{}/search.json?{}{}&raw_json=1", sub.replace('+', "%2B"), query, restrict), sub)
+		}
 		None => (format!("/search.json?{query}&raw_json=1"), String::new()),
 	};
 	Ok(listing(path, can_access_quarantine(&req, &sub), None).await)

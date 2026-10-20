@@ -272,7 +272,7 @@ fn tool_definitions() -> Value {
 				"sort": { "type": "string", "description": "Reddit search sort." },
 				"limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum results requested." },
 				"after": { "type": "string", "description": "Reddit pagination cursor from a previous response." },
-				"restrict_sr": { "type": "boolean", "description": "Restrict results to the subreddit." }
+				"restrict_sr": { "type": "boolean", "description": "Restrict results to the subreddit. Defaults to true whenever subreddit is given; pass false to search all of Reddit." }
 			}, "required": ["query"] },
 			"annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
 		},
